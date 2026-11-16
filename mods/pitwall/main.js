@@ -59,6 +59,13 @@ export default class Pitwall extends View {
       .children(body);
     const quiet = (text) => div().text_size(11).text_color(t.dim).child(text);
     const hours = (value) => value === null ? "-" : `${value.toFixed(1)}h`;
+    const grouped = (value) => value.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    const count = (value) => value == null ? "-" : grouped(String(value));
+    const dollars = (value) => value == null ? "-" : `$${grouped(value.toFixed(2))}`;
+    const metric = (label, value) => h_flex().items_center().justify_between().gap(12)
+      .child(div().flex_none().text_size(10).text_color(t.muted).child(label))
+      .child(div().flex_none().font_semibold().child(value));
+    const fuel = model.fuel;
 
     return v_flex().id("pitwall-tower").size_full().min_h(0).overflow_y_scrollbar()
       .bg(t.chrome).text_color(t.foreground).text_size(12)
@@ -107,7 +114,14 @@ export default class Pitwall extends View {
               .child(div().text_color(t.dim).child(label))
               .child(div().text_color(t.muted).child(hours(value))))),
       ]))
-      .child(section("FUEL", [quiet("-  -  -")]))
+      .child(section("FUEL", [
+        metric("TOKENS TODAY", count(fuel?.tokens_today)),
+        metric("TOKENS 7D", count(fuel?.tokens_7d)),
+        metric("PAID", fuel === null ? "-" : `${dollars(fuel.out_of_pocket_month_usd)}/mo`),
+        metric("VALUE", dollars(fuel?.api_value_30d_usd)),
+        quiet("30d, API-equivalent"),
+        metric("RATIO", fuel?.value_ratio == null ? "-" : `${fuel.value_ratio.toFixed(2)}x`),
+      ]))
       .child(section("GARAGE"))
       .child(section("RADIO"));
   }

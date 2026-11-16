@@ -27,6 +27,8 @@ pit lap ship ID
 pit concept add NAME [--must-own] | must-own NAME | pass NAME | override NAME --reason TEXT | list
 pit open
 pit state
+pit usage pull
+pit ledger show
 ```
 
 Bad input exits with code 2 and one line on stderr. A reopened ask goes back into the pit and can be answered again.
@@ -43,7 +45,7 @@ The installer checks the source before copying and checks the installed mod afte
 
 The tower reads `~/.pitwall/state.json` and watches `~/.pitwall` for changes. A 30-second fallback refreshes the data and elapsed times. Missing or invalid state shows `NO DATA`. The mod never writes files or runs commands.
 
-GRID shows Herdr's live agents. IN PIT shows open asks. SECTORS shows four scores, and LAPS shows running and completed lap times. FUEL, GARAGE, and RADIO remain placeholders for later phases.
+GRID shows Herdr's live agents. IN PIT shows open asks. SECTORS shows four scores, and LAPS shows running and completed lap times. FUEL shows usage and spend after collection. GARAGE and RADIO remain placeholders for Phase 4.
 
 To check the behavior and native render, run:
 
@@ -54,3 +56,27 @@ python3 scripts/check_mod.py
 ```
 
 The model tests use Node 22 or newer. Herdr runs the installed mod in its own native JavaScript environment. Phase screenshots stay local and are ignored by Git.
+
+## Usage and spend
+
+`pit usage pull` reads Claude Code and Codex usage through the verified per-tool `ccusage` commands. It stores the absolute path of `npx` in `~/.pitwall/config.json`, raw reports in `~/.pitwall/usage/raw-TOOL.json`, and normalized rows in `~/.pitwall/usage/daily.json`. Collection runs outside the event-log lock so agents can still ask questions during a refresh.
+
+Normalized input includes cached input. The cache columns are subsets of input, so totals add only `input_tokens` and `output_tokens`.
+
+| Normalized field | Observed ccusage source |
+|---|---|
+| `date` | Daily `date` |
+| `model` | Claude `modelBreakdowns[].modelName`; Codex `models` key |
+| `input_tokens` | `inputTokens + cacheCreationTokens + cacheReadTokens` |
+| `output_tokens` | `outputTokens` |
+| `cache_write_tokens` | `cacheCreationTokens` |
+| `cache_read_tokens` | `cacheReadTokens` |
+| `api_value_usd` | Claude model `cost`; Codex daily `costUSD` for its single model |
+
+`cacheCreation1hTokens` and `reasoningOutputTokens` are already included in their parent counters. They are not added again. A report without a model breakdown uses `model: "all"`. A Codex day with several models and no per-model costs also uses one `all` row, preserving the exact daily cost without estimating a split.
+
+Fuel uses the local calendar day. Seven-day totals include today and the previous six dates. Thirty-day value includes today and the previous 29 dates. Future rows are excluded. Later asks and answers rebuild fuel from the saved usage and ledger.
+
+`~/.pitwall/ledger.json` holds user-supplied rows with `provider`, `plan`, `usd_per_month`, and `renews_on`. `pit ledger show` prints those rows and the monthly total. An empty ledger gives a null value ratio. Subscription charges stay separate from the API-equivalent value reported by ccusage.
+
+The hourly cron command requires explicit approval before installation. Usage reports, the ledger, configuration, and cron logs stay outside the repository.

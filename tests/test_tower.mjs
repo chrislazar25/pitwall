@@ -16,6 +16,14 @@ const ask = (id, asked_at) => ({
   id, type: "taste", headline: "Dock the timing tower", project: "pitwall", agent: "codex", asked_at,
 });
 const view = (state) => tower(JSON.stringify(state), grid, now);
+const fuel = () => ({
+  tokens_today: 35639818,
+  tokens_7d: 149876543,
+  by_tool_7d: [{ tool: "claude", tokens: 74876543 }, { tool: "codex", tokens: 75000000 }],
+  api_value_30d_usd: 847.25,
+  out_of_pocket_month_usd: 200,
+  value_ratio: 4.23625,
+});
 
 test("missing and malformed snapshots retain the grid without claiming an empty queue", () => {
   for (const text of [null, "", "{", "null", "[]", "{}", "42"]) {
@@ -25,6 +33,7 @@ test("missing and malformed snapshots retain the grid without claiming an empty 
     assert.deepEqual(result.grid, grid.map((agent, index) => ({ ...agent, position: index + 1 })));
     assert.deepEqual(result.asks, []);
     assert.deepEqual(result.laps, []);
+    assert.equal(result.fuel, null);
     assert.ok(result.sectors.every((sector) => sector.value === null));
   }
 });
@@ -37,10 +46,11 @@ test("valid empty data displays zero asks and legitimate null scores and lap sum
   assert.deepEqual(result.laps, []);
   assert.equal(result.lastHours, null);
   assert.equal(result.bestHours, null);
+  assert.equal(result.fuel, null);
   assert.deepEqual(result.sectors, ["SPEED", "ASKS", "SHIP", "OWN"].map((label) => ({ label, value: null })));
 });
 
-test("any malformed consumed field makes the whole snapshot unavailable", () => {
+test("malformed queue, lap or sector fields make the snapshot unavailable", () => {
   const changes = [
     (s) => { delete s.open_asks; },
     (s) => { s.open_asks = {}; },
@@ -108,16 +118,70 @@ test("laps use the producer's lap field, preserve order, and clamp future starts
   assert.equal(result.bestHours, 0);
 });
 
-test("sectors read the actual projection field names and ignore future phase data", () => {
+test("sectors read the actual projection field names and accept the legacy fuel placeholder", () => {
   const state = empty();
   state.scores = { speed: 0, ask_quality: 25, shipping: 62.5, ownership: 100 };
   Object.assign(state, { generated_at: "ignored", fuel: {}, garage: 5, radio: false });
   const result = view(state);
   assert.equal(result.data, "ready");
+  assert.equal(result.fuel, null);
   assert.deepEqual(result.sectors, [
     { label: "SPEED", value: 0 }, { label: "ASKS", value: 25 },
     { label: "SHIP", value: 62.5 }, { label: "OWN", value: 100 },
   ]);
+});
+
+test("fuel exposes exact usage counts and spend without adding cached input again", () => {
+  const state = { ...empty(), fuel: fuel() };
+  const result = view(state);
+  assert.equal(result.data, "ready");
+  assert.deepEqual(result.fuel, fuel());
+});
+
+test("zero fuel and a null value ratio remain valid data", () => {
+  const zero = {
+    tokens_today: 0, tokens_7d: 0, by_tool_7d: [{ tool: "codex", tokens: 0 }],
+    api_value_30d_usd: 0, out_of_pocket_month_usd: 0, value_ratio: null,
+  };
+  assert.deepEqual(view({ ...empty(), fuel: zero }).fuel, zero);
+  assert.equal(view({ ...empty(), fuel: { ...zero, out_of_pocket_month_usd: 200, value_ratio: 0 } }).fuel.value_ratio, 0);
+});
+
+test("invalid or missing fuel degrades only fuel while preserving asks and laps", () => {
+  const state = empty();
+  state.open_asks = [ask("a1", "2026-11-16T19:00:00Z")];
+  state.laps = {
+    running: [{ lap: "l1", title: "Build", started_at: "2026-11-16T18:30:00Z" }],
+    last_hours: 1, best_hours: 0,
+  };
+  const baseline = view(state);
+  const invalid = [undefined, null, {}, [], "fuel", 0,
+    ...["tokens_today", "tokens_7d", "by_tool_7d", "api_value_30d_usd",
+      "out_of_pocket_month_usd", "value_ratio"].map((key) => {
+      const incomplete = fuel();
+      delete incomplete[key];
+      return incomplete;
+    }),
+    { ...fuel(), extra: true },
+    { ...fuel(), tokens_today: -1 },
+    { ...fuel(), tokens_7d: 1.5 },
+    { ...fuel(), tokens_today: "1" },
+    { ...fuel(), by_tool_7d: {} },
+    { ...fuel(), by_tool_7d: [null] },
+    { ...fuel(), by_tool_7d: [{ tool: 1, tokens: 3 }] },
+    { ...fuel(), by_tool_7d: [{ tool: "codex", tokens: -1 }] },
+    { ...fuel(), by_tool_7d: [{ tool: "codex", tokens: 0.5 }] },
+    { ...fuel(), api_value_30d_usd: -1 },
+    { ...fuel(), out_of_pocket_month_usd: "200" },
+    { ...fuel(), value_ratio: -1 },
+    { ...fuel(), value_ratio: "4x" },
+  ];
+  for (const summary of invalid) {
+    const result = view({ ...state, fuel: summary });
+    assert.deepEqual(result, baseline, JSON.stringify(summary));
+  }
+  const infinite = JSON.stringify({ ...state, fuel: fuel() }).replace('"api_value_30d_usd":847.25', '"api_value_30d_usd":1e999');
+  assert.deepEqual(tower(infinite, grid, now), baseline);
 });
 
 test("elapsed text advances when the caller supplies a later clock", () => {

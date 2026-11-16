@@ -32,6 +32,22 @@ def main():
         loaded["scores"] = {"speed": 100, "ask_quality": 0, "shipping": 52.5, "ownership": None}
         loaded["laps"]["last_hours"] = 1.25
         loaded["laps"]["best_hours"] = 0.5
+        loaded["fuel"] = {
+            "tokens_today": 35639818,
+            "tokens_7d": 149876543,
+            "by_tool_7d": [{"tool": "claude", "tokens": 74876543},
+                           {"tool": "codex", "tokens": 75000000}],
+            "api_value_30d_usd": 847.25,
+            "out_of_pocket_month_usd": 200,
+            "value_ratio": 4.23625,
+        }
+        zero_fuel = copy.deepcopy(loaded)
+        zero_fuel["fuel"] = {
+            "tokens_today": 0, "tokens_7d": 0, "by_tool_7d": [],
+            "api_value_30d_usd": 0, "out_of_pocket_month_usd": 0, "value_ratio": None,
+        }
+        invalid_fuel = copy.deepcopy(loaded)
+        invalid_fuel["fuel"] = {"tokens_today": "invalid"}
         overdue = copy.deepcopy(loaded)
         overdue["open_asks"][0]["asked_at"] = "2000-01-01T00:00:00Z"
         overdue["open_asks"][0]["headline"] = "A long headline that must stay on one line " * 12
@@ -41,6 +57,8 @@ def main():
             "wrong-shape": "{}",
             "empty": json.dumps(empty),
             "loaded": json.dumps(loaded),
+            "zero-fuel": json.dumps(zero_fuel),
+            "invalid-fuel": json.dumps(invalid_fuel),
             "overdue-long": json.dumps(overdue),
         }
         for name, text in fixtures.items():
