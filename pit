@@ -1,0 +1,385 @@
+#!/opt/homebrew/bin/python3
+"""pit: log typed asks to Chris, laps and concepts as append-only events."""
+
+import argparse
+import fcntl
+import json
+import os
+import secrets
+import subprocess
+import sys
+import tempfile
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+ASK_TYPES = ("decide", "review", "unblock", "taste", "context", "teach")
+NEEDS_OPTIONS = ("decide", "taste")
+REFUSES_DEFAULT = ("context", "unblock", "teach")
+WRITES_DECISION = ("decide", "review", "taste", "context")
+CONTROL_ACTIONS = ("pause", "cancel", "reprioritize", "revoke")
+
+
+class BadInput(Exception):
+    pass
+
+
+def data_dir():
+    return Path(os.environ.get("PITWALL_HOME") or Path.home() / ".pitwall")
+
+
+def now():
+    return datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_ts(ts):
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def hours_between(start, end):
+    return round((parse_ts(end) - parse_ts(start)).total_seconds() / 3600, 2)
+
+
+def repo_root():
+    r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                       capture_output=True, text=True)
+    return Path(r.stdout.strip()) if r.returncode == 0 else None
+
+
+def current_project():
+    root = repo_root()
+    return (root.name, root) if root else ("none", None)
+
+
+def read_events():
+    path = data_dir() / "events.jsonl"
+    if not path.exists():
+        return []
+    with path.open() as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def write_atomic(path, text):
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def load_json(path, default):
+    return json.loads(path.read_text()) if path.exists() else default
+
+
+# The state is a fold over the event log. Each kind has one reducer.
+
+def fresh_model():
+    return {"asks": {}, "laps": {}, "concepts": {}}
+
+
+def on_ask(m, e):
+    m["asks"][e["id"]] = {**e, "open": True, "answers": [], "reopened": False}
+
+
+def on_answer(m, e):
+    ask = m["asks"][e["id"]]
+    ask["open"] = False
+    ask["answers"].append(e)
+
+
+def on_reopen(m, e):
+    ask = m["asks"][e["id"]]
+    ask["open"] = True
+    ask["reopened"] = True
+
+
+def on_lap_start(m, e):
+    m["laps"][e["lap"]] = {**e, "shipped_at": None}
+
+
+def on_lap_ship(m, e):
+    m["laps"][e["lap"]]["shipped_at"] = e["ts"]
+
+
+def on_concept(m, e):
+    m["concepts"][(e["project"], e["name"])] = e
+
+
+REDUCERS = {
+    "ask": on_ask,
+    "answer": on_answer,
+    "reopen": on_reopen,
+    "lap_start": on_lap_start,
+    "lap_ship": on_lap_ship,
+    "concept": on_concept,
+    "control": lambda m, e: None,
+}
+
+
+def build_model(events):
+    m = fresh_model()
+    for e in events:
+        REDUCERS[e["kind"]](m, e)
+    return m
+
+
+def build_state(m):
+    open_asks = [
+        {"id": a["id"], "type": a["type"], "agent": a["agent"], "project": a["project"],
+         "headline": a["headline"], "asked_at": a["ts"]}
+        for a in m["asks"].values() if a["open"]
+    ]
+    running = [
+        {"lap": l["lap"], "project": l["project"], "title": l["title"], "started_at": l["ts"]}
+        for l in m["laps"].values() if l["shipped_at"] is None
+    ]
+    shipped = sorted((l for l in m["laps"].values() if l["shipped_at"]),
+                     key=lambda l: l["shipped_at"])
+    lengths = [hours_between(l["ts"], l["shipped_at"]) for l in shipped]
+    return {
+        "generated_at": now(),
+        "open_asks": open_asks,
+        "laps": {
+            "running": running,
+            "last_hours": lengths[-1] if lengths else None,
+            "best_hours": min(lengths) if lengths else None,
+            "shipped_total": len(shipped),
+        },
+        "scores": {"speed": None, "ask_quality": None, "shipping": None, "ownership": None},
+        "fuel": None,
+        "garage": [],
+        "radio": None,
+    }
+
+
+def rebuild_state():
+    state = build_state(build_model(read_events()))
+    write_atomic(data_dir() / "state.json", json.dumps(state, indent=2) + "\n")
+    return state
+
+
+@contextmanager
+def locked():
+    d = data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    with (d / ".lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def register_project(name, root):
+    if root is None:
+        return
+    path = data_dir() / "projects.json"
+    projects = load_json(path, {})
+    if name not in projects:
+        projects[name] = str(root)
+        write_atomic(path, json.dumps(projects, indent=2) + "\n")
+
+
+def append(event):
+    event = {"ts": now(), **event}
+    with (data_dir() / "events.jsonl").open("a") as f:
+        f.write(json.dumps(event) + "\n")
+    rebuild_state()
+    return event
+
+
+def new_id(prefix):
+    return f"{prefix}-{secrets.token_hex(4)}"
+
+
+# Commands. Each validates against the current model, then appends one event.
+
+def cmd_ask(a, m, project):
+    opts = a.option or []
+    if a.type in NEEDS_OPTIONS and (len(opts) < 2 or a.default is None):
+        raise BadInput(f"{a.type} needs two or more --option and a --default")
+    if a.type in REFUSES_DEFAULT and a.default is not None:
+        raise BadInput(f"{a.type} takes no --default")
+    if a.type == "teach" and not a.concept:
+        raise BadInput("teach needs --concept")
+    if any(x["open"] and x["agent"] == a.agent and x["project"] == project
+           for x in m["asks"].values()):
+        print(f"pit: warning: {a.agent} already has an open ask in {project}", file=sys.stderr)
+    e = append({"kind": "ask", "id": new_id("a"), "type": a.type, "agent": a.agent,
+                "project": project, "headline": a.headline, "reason": a.reason,
+                "options": opts, "default": a.default, "artifact": a.artifact,
+                "lap": a.lap, "concept": a.concept})
+    print(e["id"])
+
+
+def cmd_answer(a, m, project):
+    ask = m["asks"].get(a.id)
+    if ask is None:
+        raise BadInput(f"unknown ask {a.id}")
+    if not ask["open"]:
+        raise BadInput(f"ask {a.id} is already answered")
+    e = append({"kind": "answer", "id": a.id, "answer": a.answer,
+                "took_default": a.took_default, "needed": not a.not_needed})
+    if ask["type"] in WRITES_DECISION:
+        root = load_json(data_dir() / "projects.json", {}).get(ask["project"])
+        if root:
+            decisions = Path(root) / ".pit" / "decisions.md"
+            decisions.parent.mkdir(exist_ok=True)
+            with decisions.open("a") as f:
+                f.write(f"- {e['ts'][:10]} [{ask['type']}] {ask['headline']} -> {a.answer}\n")
+
+
+def cmd_reopen(a, m, project):
+    ask = m["asks"].get(a.id)
+    if ask is None:
+        raise BadInput(f"unknown ask {a.id}")
+    if ask["open"]:
+        raise BadInput(f"ask {a.id} is not answered")
+    append({"kind": "reopen", "id": a.id})
+
+
+def cmd_control(a, m, project):
+    append({"kind": "control", "action": a.action, "agent": a.agent,
+            "project": project, "note": a.note})
+
+
+def cmd_lap_start(a, m, project):
+    e = append({"kind": "lap_start", "lap": new_id("l"), "project": project, "title": a.title})
+    print(e["lap"])
+
+
+def cmd_lap_ship(a, m, project):
+    lap = m["laps"].get(a.id)
+    if lap is None or lap["shipped_at"] is not None:
+        raise BadInput(f"no running lap {a.id}")
+    append({"kind": "lap_ship", "lap": a.id})
+
+
+def concept_event(project, name, must_own, status, note=None):
+    append({"kind": "concept", "project": project, "name": name,
+            "must_own": must_own, "status": status, "note": note})
+
+
+def existing_concept(m, project, name):
+    c = m["concepts"].get((project, name))
+    if c is None:
+        raise BadInput(f"unknown concept {name} in {project}")
+    return c
+
+
+def cmd_concept_add(a, m, project):
+    concept_event(project, a.name, a.must_own, "not_passed")
+
+
+def cmd_concept_must_own(a, m, project):
+    c = existing_concept(m, project, a.name)
+    concept_event(project, a.name, True, c["status"])
+
+
+def cmd_concept_pass(a, m, project):
+    c = existing_concept(m, project, a.name)
+    concept_event(project, a.name, c["must_own"], "passed")
+
+
+def cmd_concept_override(a, m, project):
+    c = existing_concept(m, project, a.name)
+    concept_event(project, a.name, c["must_own"], "passed", a.reason)
+
+
+def cmd_concept_list(a, m, project):
+    for (proj, name), c in m["concepts"].items():
+        if proj == project:
+            print(f"{name}\tmust-own={'yes' if c['must_own'] else 'no'}\t{c['status']}")
+
+
+def cmd_open(a, m, project):
+    t = parse_ts(now())
+    for x in m["asks"].values():
+        if x["open"]:
+            waiting = int((t - parse_ts(x["ts"])).total_seconds() // 60)
+            print(f"{x['id']}\t{x['type']}\t{x['agent']}\t{x['project']}\t{waiting}m\t{x['headline']}")
+
+
+def cmd_state(a, m, project):
+    print(json.dumps(rebuild_state(), indent=2))
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        print(f"pit: {message}", file=sys.stderr)
+        sys.exit(2)
+
+
+def build_parser():
+    p = Parser(prog="pit", description="Log typed asks to Chris, laps and concepts.")
+    sub = p.add_subparsers(dest="cmd", required=True, parser_class=Parser)
+
+    s = sub.add_parser("ask", help="log an ask and print its id")
+    s.add_argument("--type", required=True, choices=ASK_TYPES)
+    s.add_argument("--agent", required=True)
+    s.add_argument("--headline", required=True)
+    s.add_argument("--reason", required=True)
+    s.add_argument("--option", action="append")
+    s.add_argument("--default")
+    s.add_argument("--artifact")
+    s.add_argument("--lap")
+    s.add_argument("--concept")
+    s.set_defaults(fn=cmd_ask)
+
+    s = sub.add_parser("answer", help="record Chris's answer")
+    s.add_argument("id")
+    s.add_argument("--answer", required=True)
+    s.add_argument("--took-default", required=True, choices=("yes", "no", "na"))
+    s.add_argument("--not-needed", action="store_true")
+    s.set_defaults(fn=cmd_answer)
+
+    s = sub.add_parser("reopen", help="reopen an answered ask")
+    s.add_argument("id")
+    s.set_defaults(fn=cmd_reopen)
+
+    s = sub.add_parser("control", help="log pause, cancel, reprioritize or revoke")
+    s.add_argument("--action", required=True, choices=CONTROL_ACTIONS)
+    s.add_argument("--agent", required=True)
+    s.add_argument("--note")
+    s.set_defaults(fn=cmd_control)
+
+    lap = sub.add_parser("lap", help="start or ship a lap").add_subparsers(
+        dest="lap_cmd", required=True, parser_class=Parser)
+    s = lap.add_parser("start")
+    s.add_argument("--title", required=True)
+    s.set_defaults(fn=cmd_lap_start)
+    s = lap.add_parser("ship")
+    s.add_argument("id")
+    s.set_defaults(fn=cmd_lap_ship)
+
+    con = sub.add_parser("concept", help="record concepts and the teach gate").add_subparsers(
+        dest="concept_cmd", required=True, parser_class=Parser)
+    s = con.add_parser("add")
+    s.add_argument("name")
+    s.add_argument("--must-own", action="store_true")
+    s.set_defaults(fn=cmd_concept_add)
+    for verb, fn in (("must-own", cmd_concept_must_own), ("pass", cmd_concept_pass)):
+        s = con.add_parser(verb)
+        s.add_argument("name")
+        s.set_defaults(fn=fn)
+    s = con.add_parser("override")
+    s.add_argument("name")
+    s.add_argument("--reason", required=True)
+    s.set_defaults(fn=cmd_concept_override)
+    con.add_parser("list").set_defaults(fn=cmd_concept_list)
+
+    sub.add_parser("open", help="list open asks").set_defaults(fn=cmd_open)
+    sub.add_parser("state", help="rebuild and print state.json").set_defaults(fn=cmd_state)
+    return p
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
+    project, root = current_project()
+    try:
+        with locked():
+            register_project(project, root)
+            a.fn(a, build_model(read_events()), project)
+    except BadInput as err:
+        print(f"pit: {err}", file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
