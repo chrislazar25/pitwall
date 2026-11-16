@@ -2,3 +2,7 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .pit/
+shot-phase2-*.png
+mods/*/*.d.ts
+mods/*/jsconfig.json
+mods/*/*.error
