@@ -120,3 +120,18 @@ The coach skips a run when the latest seven distinct score dates all have four s
 Scores, garage data, and accepted notes survive later asks and state rebuilds. Slow Git and Claude processes run outside the event-log lock. A damaged optional analytics file produces a diagnostic without preventing an ask from being logged.
 
 The daily 08:23 local-time score, health, and coach job requires explicit approval before installation. It preserves the existing hourly usage job. The full track-and-pit visual theme is a separate proposed pass.
+
+## Race prototype
+
+Phase 5 Step A is a disposable circuit prototype. Install it with
+`python3 scripts/install_race.py`, then run
+`herdr-app do layout.switch '{"name":"race"}'`. The new layout shows a demo
+car above the focused real terminal, with the Pit tower in a right drawer.
+Your existing layouts and keys are preserved. The prototype advances 2%
+every two seconds; it does not represent task progress or live lap state.
+Use `props.driver: "codex"` in the race track block for the blue Codex livery.
+The default is the orange and cream Claude car.
+
+Chris chooses the circuit or straight speedway after watching the demo.
+Steps B and C wait for that decision. See [PHASE5.md](PHASE5.md) for the
+remaining data, interaction, and acceptance requirements.

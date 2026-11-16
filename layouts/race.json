@@ -1,0 +1,46 @@
+{
+  "id": "race-root",
+  "type": "column",
+  "background": "canvas",
+  "divider": {
+    "width": 1,
+    "color": "border"
+  },
+  "children": [
+    {
+      "id": "race-track",
+      "type": "block",
+      "size": {
+        "weight": 1
+      },
+      "content": {
+        "mod": "racetrack",
+        "props": {
+          "demo": true,
+          "driver": "claude"
+        }
+      }
+    },
+    {
+      "id": "race-onboard",
+      "type": "block",
+      "size": {
+        "weight": 1
+      },
+      "content": {
+        "agent": "focused"
+      }
+    }
+  ],
+  "floating": [
+    {
+      "id": "race-tower",
+      "content": {
+        "mod": "pitwall"
+      },
+      "edge": "right",
+      "align": "center",
+      "peek": 52
+    }
+  ]
+}
