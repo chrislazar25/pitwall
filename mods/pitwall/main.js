@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { agents, theme, home, readTextFile, watchFolder } from "herdr";
+import { agents, theme, home, readTextFile, watchFolder, placement } from "herdr";
 import { tower } from "./model.js";
 
 export default class Pitwall extends View {
@@ -69,7 +69,9 @@ export default class Pitwall extends View {
     const garageColumns = [["CI", "ci", 22], ["TEST", "tests", 32],
       ["README", "readme", 44], ["ACTIVE", "active", 40]];
 
-    return v_flex().id("pitwall-tower").size_full().min_h(0).overflow_y_scrollbar()
+    return v_flex().id("pitwall-tower").size_full()
+      .when(placement() !== null, (el) => el.w(380).h(800))
+      .min_h(0).overflow_y_scrollbar()
       .bg(t.chrome).text_color(t.foreground).text_size(12)
       .child(v_flex().flex_none().px(16).py(12).gap(7)
         .child(h_flex().items_center().gap(9)
