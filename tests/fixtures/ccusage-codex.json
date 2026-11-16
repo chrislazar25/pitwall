@@ -1,0 +1,25 @@
+{
+  "daily": [
+    {
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 20737408,
+      "costUSD": 3.4573348,
+      "date": "2026-11-16",
+      "inputTokens": 421202,
+      "models": {
+        "gpt-6.1-sol": {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 20737408,
+          "inputTokens": 421202,
+          "isFallback": false,
+          "outputTokens": 54119,
+          "reasoningOutputTokens": 16751,
+          "totalTokens": 21212729
+        }
+      },
+      "outputTokens": 54119,
+      "reasoningOutputTokens": 16751,
+      "totalTokens": 21212729
+    }
+  ]
+}

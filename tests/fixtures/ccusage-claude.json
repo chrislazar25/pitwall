@@ -1,0 +1,27 @@
+{
+  "daily": [
+    {
+      "cacheCreationTokens": 457710,
+      "cacheReadTokens": 13888283,
+      "date": "2026-11-16",
+      "inputTokens": 192,
+      "modelBreakdowns": [
+        {
+          "cacheCreation1hTokens": 457710,
+          "cacheCreationTokens": 457710,
+          "cacheReadTokens": 13888283,
+          "cost": 8.0581846,
+          "inputTokens": 192,
+          "modelName": "claude-opus-5-5",
+          "outputTokens": 80904
+        }
+      ],
+      "modelsUsed": [
+        "claude-opus-5-5"
+      ],
+      "outputTokens": 80904,
+      "totalCost": 8.0581846,
+      "totalTokens": 14427089
+    }
+  ]
+}

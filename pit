@@ -4,13 +4,15 @@
 import argparse
 import fcntl
 import json
+import math
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 ASK_TYPES = ("decide", "review", "unblock", "taste", "context", "teach")
@@ -153,15 +155,22 @@ def build_state(m):
 
 def rebuild_state():
     state = build_state(build_model(read_events()))
+    daily = data_dir() / "usage" / "daily.json"
+    if daily.exists():
+        try:
+            rows = validate_usage(read_usage_json(daily))
+            state["fuel"] = calculate_fuel(rows, read_ledger(), date.today())
+        except BadInput as err:
+            print(f"pit: fuel unavailable: {err}", file=sys.stderr)
     write_atomic(data_dir() / "state.json", json.dumps(state, indent=2) + "\n")
     return state
 
 
 @contextmanager
-def locked():
+def locked(name=".lock"):
     d = data_dir()
     d.mkdir(parents=True, exist_ok=True)
-    with (d / ".lock").open("w") as lock:
+    with (d / name).open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         yield
 
@@ -300,6 +309,202 @@ def cmd_state(a, m, project):
     print(json.dumps(rebuild_state(), indent=2))
 
 
+USAGE_TOOLS = {"claude": "totalCost", "codex": "costUSD"}
+TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens")
+
+
+def nonnegative(value, label, integer=False):
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0
+            or (integer and not isinstance(value, int))):
+        raise BadInput(f"{label} must be a finite nonnegative {'integer' if integer else 'number'}")
+    return value
+
+
+def usage_date(value):
+    if not isinstance(value, str):
+        raise BadInput("usage date must be YYYY-MM-DD")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise BadInput("usage date must be YYYY-MM-DD") from None
+    if parsed.isoformat() != value:
+        raise BadInput("usage date must be YYYY-MM-DD")
+    return parsed
+
+
+def read_usage_json(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError) as err:
+        raise BadInput(f"cannot read {path.name}: {' '.join(str(err).split())}") from None
+
+
+def validate_usage(rows):
+    if not isinstance(rows, list):
+        raise BadInput("daily usage must be a list")
+    for row in rows:
+        if not isinstance(row, dict):
+            raise BadInput("usage row must be an object")
+        usage_date(row.get("date"))
+        for key in ("tool", "model"):
+            if not isinstance(row.get(key), str) or not row[key]:
+                raise BadInput(f"usage {key} must be a nonempty string")
+        for key in TOKEN_KEYS:
+            nonnegative(row.get(key), key, integer=True)
+        nonnegative(row.get("api_value_usd"), "api_value_usd")
+        if row["cache_write_tokens"] + row["cache_read_tokens"] > row["input_tokens"]:
+            raise BadInput("cache tokens exceed input tokens")
+    return rows
+
+
+def read_ledger():
+    path = data_dir() / "ledger.json"
+    rows = read_usage_json(path) if path.exists() else []
+    if not isinstance(rows, list):
+        raise BadInput("ledger must be a list")
+    for row in rows:
+        if not isinstance(row, dict):
+            raise BadInput("ledger row must be an object")
+        for key in ("provider", "plan", "renews_on"):
+            if not isinstance(row.get(key), str) or not row[key].strip():
+                raise BadInput(f"ledger {key} must be a nonempty string")
+        nonnegative(row.get("usd_per_month"), "ledger usd_per_month")
+    return rows
+
+
+def report_row(tool, day, model, counters, cost):
+    if not isinstance(counters, dict):
+        raise BadInput(f"{tool} token counters must be an object")
+    values = [nonnegative(counters.get(key), f"{tool} {key}", integer=True)
+              for key in ("inputTokens", "outputTokens", "cacheCreationTokens", "cacheReadTokens")]
+    uncached, out, write, read = values
+    return {"date": day, "tool": tool, "model": model,
+            "input_tokens": uncached + write + read, "output_tokens": out,
+            "cache_write_tokens": write, "cache_read_tokens": read,
+            "api_value_usd": nonnegative(cost, f"{tool} cost")}
+
+
+def map_usage(tool, report):
+    if tool not in USAGE_TOOLS:
+        raise BadInput(f"unsupported usage tool {tool}")
+    if not isinstance(report, dict) or not isinstance(report.get("daily"), list):
+        raise BadInput(f"{tool} report needs a daily list")
+    rows = []
+    for day in report["daily"]:
+        if not isinstance(day, dict):
+            raise BadInput(f"{tool} daily row must be an object")
+        stamp = day.get("date")
+        usage_date(stamp)
+        aggregate = report_row(tool, stamp, "all", day, day.get(USAGE_TOOLS[tool]))
+        total = nonnegative(day.get("totalTokens"), f"{tool} totalTokens", integer=True)
+        mapped = []
+        if tool == "claude":
+            breakdowns = day.get("modelBreakdowns", [])
+            if not isinstance(breakdowns, list):
+                raise BadInput("claude modelBreakdowns must be a list")
+            for model in breakdowns:
+                if not isinstance(model, dict):
+                    raise BadInput("claude model breakdown must be an object")
+                mapped.append(report_row(tool, stamp, model.get("modelName"), model, model.get("cost")))
+        else:
+            models = day.get("models", {})
+            if not isinstance(models, dict):
+                raise BadInput("codex models must be an object")
+            if any(not isinstance(v, dict) for v in models.values()):
+                raise BadInput("codex model counters must be objects")
+            if len(models) == 1:
+                name, counters = next(iter(models.items()))
+                mapped.append(report_row(tool, stamp, name, counters, aggregate["api_value_usd"]))
+            elif models and all(isinstance(v, dict) and "costUSD" in v for v in models.values()):
+                mapped = [report_row(tool, stamp, name, v, v["costUSD"]) for name, v in models.items()]
+        mapped = mapped or [aggregate]
+        validate_usage(mapped)
+        if (sum(r["input_tokens"] + r["output_tokens"] for r in mapped) != total
+                or aggregate["input_tokens"] + aggregate["output_tokens"] != total
+                or any(sum(r[k] for r in mapped) != aggregate[k] for k in TOKEN_KEYS)
+                or not math.isclose(sum(r["api_value_usd"] for r in mapped),
+                                    aggregate["api_value_usd"], rel_tol=1e-9, abs_tol=1e-9)):
+            raise BadInput(f"{tool} {stamp} token or cost totals disagree")
+        rows.extend(mapped)
+    return rows
+
+
+def calculate_fuel(rows, ledger, today):
+    tokens_today = 0
+    by_tool = {}
+    value = 0
+    for row in rows:
+        age = (today - date.fromisoformat(row["date"])).days
+        tokens = row["input_tokens"] + row["output_tokens"]
+        if age == 0:
+            tokens_today += tokens
+        if 0 <= age < 7:
+            by_tool[row["tool"]] = by_tool.get(row["tool"], 0) + tokens
+        if 0 <= age < 30:
+            value += row["api_value_usd"]
+    paid = sum(row["usd_per_month"] for row in ledger)
+    return {"tokens_today": tokens_today, "tokens_7d": sum(by_tool.values()),
+            "by_tool_7d": [{"tool": tool, "tokens": by_tool[tool]} for tool in sorted(by_tool)],
+            "api_value_30d_usd": value, "out_of_pocket_month_usd": paid,
+            "value_ratio": value / paid if paid else None}
+
+
+def cmd_ledger_show(a, m, project):
+    rows = read_ledger()
+    for row in rows:
+        print(f"{row['provider']}\t{row['plan']}\t${row['usd_per_month']:.2f}/mo\t{row['renews_on']}")
+    print(f"TOTAL ${sum(row['usd_per_month'] for row in rows):.2f}/mo")
+
+
+def cmd_usage_pull(a):
+    with locked(".usage.lock"):
+        with locked():
+            config_path = data_dir() / "config.json"
+            config = read_usage_json(config_path) if config_path.exists() else {}
+            if not isinstance(config, dict):
+                raise BadInput("config must be an object")
+            npx = config.get("npx") or shutil.which("npx")
+            if not isinstance(npx, str) or not Path(npx).is_absolute() or not os.access(npx, os.X_OK):
+                raise BadInput("npx must be an absolute executable path in config.json or PATH")
+            if config.get("npx") != npx:
+                write_atomic(config_path, json.dumps({**config, "npx": npx}, indent=2) + "\n")
+            ledger_path = data_dir() / "ledger.json"
+            if not ledger_path.exists():
+                write_atomic(ledger_path, "[]\n")
+            read_ledger()
+        raw, rows = {}, []
+        for tool in USAGE_TOOLS:
+            try:
+                result = subprocess.run([npx, "--yes", "ccusage@latest", tool, "daily", "--json"],
+                                        capture_output=True, text=True, timeout=120)
+            except (OSError, subprocess.TimeoutExpired) as err:
+                raise BadInput(f"{tool} usage pull failed: {err}") from None
+            if result.returncode:
+                detail = " ".join(result.stderr.split())[:300] or f"exit {result.returncode}"
+                raise BadInput(f"{tool} usage pull failed: {detail}")
+            try:
+                report = json.loads(result.stdout)
+            except ValueError:
+                raise BadInput(f"{tool} usage report is not valid JSON") from None
+            mapped = map_usage(tool, report)
+            raw[tool] = result.stdout
+            rows.extend(mapped)
+            if not mapped:
+                print(f"pit: {tool}: no data, skipped", file=sys.stderr)
+            elif tool == "codex" and any(len(day.get("models", {})) > 1 and
+                    not all("costUSD" in v for v in day["models"].values()) for day in report["daily"]):
+                print("pit: codex: multiple models without costs, aggregated as all", file=sys.stderr)
+        with locked():
+            read_ledger()
+            usage = data_dir() / "usage"
+            usage.mkdir(exist_ok=True)
+            for tool, report in raw.items():
+                write_atomic(usage / f"raw-{tool}.json", report)
+            write_atomic(usage / "daily.json", json.dumps(rows, indent=2) + "\n")
+            rebuild_state()
+
+
 class Parser(argparse.ArgumentParser):
     def error(self, message):
         print(f"pit: {message}", file=sys.stderr)
@@ -364,6 +569,13 @@ def build_parser():
     s.set_defaults(fn=cmd_concept_override)
     con.add_parser("list").set_defaults(fn=cmd_concept_list)
 
+    usage = sub.add_parser("usage", help="collect local token usage").add_subparsers(
+        dest="usage_cmd", required=True, parser_class=Parser)
+    usage.add_parser("pull").set_defaults(fn=cmd_usage_pull)
+    ledger = sub.add_parser("ledger", help="show monthly plan spend").add_subparsers(
+        dest="ledger_cmd", required=True, parser_class=Parser)
+    ledger.add_parser("show").set_defaults(fn=cmd_ledger_show)
+
     sub.add_parser("open", help="list open asks").set_defaults(fn=cmd_open)
     sub.add_parser("state", help="rebuild and print state.json").set_defaults(fn=cmd_state)
     return p
@@ -373,11 +585,17 @@ def main(argv=None):
     a = build_parser().parse_args(argv)
     project, root = current_project()
     try:
+        if a.cmd == "usage":
+            cmd_usage_pull(a)
+            return
+        if a.cmd == "ledger":
+            cmd_ledger_show(a, None, project)
+            return
         with locked():
             register_project(project, root)
             a.fn(a, build_model(read_events()), project)
-    except BadInput as err:
-        print(f"pit: {err}", file=sys.stderr)
+    except (BadInput, OSError) as err:
+        print(f"pit: {' '.join(str(err).split())}", file=sys.stderr)
         sys.exit(2)
 
 
