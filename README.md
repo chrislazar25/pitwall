@@ -29,6 +29,9 @@ pit open
 pit state
 pit usage pull
 pit ledger show
+pit score
+pit health
+pit coach
 ```
 
 Bad input exits with code 2 and one line on stderr. A reopened ask goes back into the pit and can be answered again.
@@ -45,7 +48,7 @@ The installer checks the source before copying and checks the installed mod afte
 
 The tower reads `~/.pitwall/state.json` and watches `~/.pitwall` for changes. A 30-second fallback refreshes the data and elapsed times. Missing or invalid state shows `NO DATA`. The mod never writes files or runs commands.
 
-GRID shows Herdr's live agents. IN PIT shows open asks. SECTORS shows four scores, and LAPS shows running and completed lap times. FUEL shows usage and spend after collection. GARAGE and RADIO remain placeholders for Phase 4.
+GRID shows Herdr's live agents. IN PIT shows open asks. SECTORS shows four scores, and LAPS shows running and completed lap times. FUEL shows usage and spend after collection. GARAGE shows registered project checks. RADIO shows the latest accepted coach note.
 
 To check the behavior and native render, run:
 
@@ -80,3 +83,40 @@ Fuel uses the local calendar day. Seven-day totals include today and the previou
 `~/.pitwall/ledger.json` holds user-supplied rows with `provider`, `plan`, `usd_per_month`, and `renews_on`. `pit ledger show` prints those rows and the monthly total. An empty ledger gives a null value ratio. Subscription charges stay separate from the API-equivalent value reported by ccusage.
 
 The hourly cron command requires explicit approval before installation. Usage reports, the ledger, configuration, and cron logs stay outside the repository.
+
+## Scores, project health, and coach
+
+`pit score` calculates four separate scores from the event log and appends a dated record to `~/.pitwall/scores.jsonl`. A later record for the same date replaces that date's earlier value when the history is read.
+
+| Score | Calculation |
+|---|---|
+| SPEED | `100 × (120 − median wait minutes) ÷ 115`, limited to 0–100 |
+| ASKS | Percent of answered asks marked needed and never reopened |
+| SHIP | `50 × baseline median lap hours ÷ current median lap hours`, capped at 100 |
+| OWN | Percent of current must-own concepts marked passed |
+
+The ask cohort contains unique asks answered in the last seven times 24 hours. A repeated answer uses the latest answer in that window, measured from the original ask. Reopened asks remain in the cohort but lose quality credit. Shipping compares the first ten shipped laps with shipments in the seven-day window. Ownership uses the current concept state, including earlier passes and explicit overrides. Future events are excluded. Scores are rounded half-up after calculation.
+
+Unavailable metrics show dashes. Shipping needs ten shipped laps and at least one recent shipment. A zero current median with a positive baseline scores 100; two zero medians are undefined and show a dash. Ownership needs at least one must-own concept. Only the user marks concepts must-own.
+
+`pit health` checks every existing registered project and saves `~/.pitwall/garage.json`. Its flags mean the following:
+
+| Flag | Evidence |
+|---|---|
+| CI | A YAML workflow file directly under `.github/workflows/` |
+| TEST | A root `tests`, `test`, or `__tests__` directory |
+| README | A root file whose name starts with `README` |
+| ACTIVE | A commit within the previous 14 days |
+| 7D | Git's commit count since seven days ago |
+
+These flags describe repository files and activity. They do not claim that CI or tests passed. Deleted project paths are omitted. A directory without a usable Git HEAD has inactive status and zero commits.
+
+`pit coach` sends the current state, the previous 14 days of events, and 14 calendar days of usage to the installed headless Claude CLI. The coach runs with customizations, hooks, built-in tools, and MCP tools disabled. It can produce text but cannot execute commands or edit code or rules.
+
+The reply must contain exactly two nonempty lines, beginning `Observation: ` and `Tweak: `. With less than seven days of event history, the observation must say `not enough data yet`. Accepted replies become `~/.pitwall/coach/YYYY-MM-DD.md`. Invalid replies go to `.rejected.md` and leave the accepted note intact. The coach proposes changes; it does not apply them.
+
+The coach skips a run when the latest seven distinct score dates all have four scores of at least 60 and the newest accepted note is less than 14 calendar days old. Dates need not be consecutive. Rejected notes do not affect this check.
+
+Scores, garage data, and accepted notes survive later asks and state rebuilds. Slow Git and Claude processes run outside the event-log lock. A damaged optional analytics file produces a diagnostic without preventing an ask from being logged.
+
+The daily 08:23 local-time score, health, and coach job requires explicit approval before installation. It preserves the existing hourly usage job. The full track-and-pit visual theme is a separate proposed pass.

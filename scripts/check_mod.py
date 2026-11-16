@@ -41,6 +41,17 @@ def main():
             "out_of_pocket_month_usd": 200,
             "value_ratio": 4.23625,
         }
+        loaded["garage"] = [
+            {"project": "pitwall", "ci": True, "tests": True, "readme": True,
+             "active": True, "commits_7d": 12},
+            {"project": "quiet project", "ci": False, "tests": False, "readme": False,
+             "active": False, "commits_7d": 0},
+        ]
+        loaded["radio"] = {
+            "date": "2026-11-16",
+            "observation": "Not enough data yet to compare shipping and learning.",
+            "tweak": "Keep the next lap small and pass its must-own concept.",
+        }
         zero_fuel = copy.deepcopy(loaded)
         zero_fuel["fuel"] = {
             "tokens_today": 0, "tokens_7d": 0, "by_tool_7d": [],
@@ -48,6 +59,19 @@ def main():
         }
         invalid_fuel = copy.deepcopy(loaded)
         invalid_fuel["fuel"] = {"tokens_today": "invalid"}
+        invalid_garage = copy.deepcopy(loaded)
+        invalid_garage["garage"] = [{"project": "pitwall", "ci": "invalid"}]
+        invalid_radio = copy.deepcopy(loaded)
+        invalid_radio["radio"] = {"date": "2026-02-30", "observation": "Invalid date", "tweak": "Keep prior note"}
+        invalid_scores = copy.deepcopy(loaded)
+        invalid_scores["scores"] = {"speed": "invalid"}
+        legacy_placeholders = copy.deepcopy(loaded)
+        legacy_placeholders["garage"] = 5
+        legacy_placeholders["radio"] = False
+        long_coach = copy.deepcopy(loaded)
+        long_coach["radio"]["observation"] = "Every observation word remains readable and wraps. " * 100
+        long_coach["radio"]["tweak"] = "Every proposed tweak word remains readable and wraps. " * 100
+        long_coach["garage"][0]["project"] = "A long project name that wraps without hiding the checks " * 4
         overdue = copy.deepcopy(loaded)
         overdue["open_asks"][0]["asked_at"] = "2000-01-01T00:00:00Z"
         overdue["open_asks"][0]["headline"] = "A long headline that must stay on one line " * 12
@@ -59,6 +83,11 @@ def main():
             "loaded": json.dumps(loaded),
             "zero-fuel": json.dumps(zero_fuel),
             "invalid-fuel": json.dumps(invalid_fuel),
+            "invalid-garage": json.dumps(invalid_garage),
+            "invalid-radio": json.dumps(invalid_radio),
+            "invalid-scores": json.dumps(invalid_scores),
+            "legacy-placeholders": json.dumps(legacy_placeholders),
+            "long-coach": json.dumps(long_coach),
             "overdue-long": json.dumps(overdue),
         }
         for name, text in fixtures.items():
@@ -74,6 +103,7 @@ def main():
             )
             print(f"Native fixture: {name}", flush=True)
             subprocess.run([herdr, "check", str(folder)], check=True)
+        print(f"OK: source and {len(fixtures)} native fixtures", flush=True)
 
 
 if __name__ == "__main__":

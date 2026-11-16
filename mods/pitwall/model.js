@@ -20,12 +20,24 @@ const validFuel = (fuel) => record(fuel) && Object.keys(fuel).length === fuelKey
     typeof row.tool === "string" && tokens(row.tokens)) &&
   nonnegative(fuel.api_value_30d_usd) && nonnegative(fuel.out_of_pocket_month_usd) &&
   (fuel.value_ratio === null || nonnegative(fuel.value_ratio));
+const garageChecks = ["ci", "tests", "readme", "active"];
+const validGarage = (garage) => Array.isArray(garage) && garage.every((row) => record(row) &&
+  typeof row.project === "string" && garageChecks.every((key) => typeof row[key] === "boolean") &&
+  tokens(row.commits_7d));
+const coachLine = (value) => typeof value === "string" && value.trim().length > 0 &&
+  !/[\r\n\u2028\u2029]/.test(value);
+const validRadio = (radio) => record(radio) && typeof radio.date === "string" &&
+  /^\d{4}-\d{2}-\d{2}$/.test(radio.date) && date(radio.date) &&
+  new Date(radio.date).toISOString().slice(0, 10) === radio.date &&
+  coachLine(radio.observation) && coachLine(radio.tweak);
+const validScores = (scores) => record(scores) &&
+  sectors.every(([, field]) => numberOrNull(scores[field], 100));
 
 /**
  * Return a Tower from snapshot text, ordered Herdr grid agents, and epoch milliseconds.
  * Tower.data is "ready" or "no-data". Only unavailable data has a null openCount.
  * Grid agents have key, programName, spaceName, and status. Elapsed values are numeric.
- * Fuel is the six-field usage summary, or null when usage is unavailable or invalid.
+ * Optional analytics degrade independently. Garage is an array, radio and fuel are nullable.
  */
 export function tower(snapshotText, gridAgents, nowMs) {
   const grid = gridAgents.map((agent, index) => ({ ...agent, position: index + 1 }));
@@ -39,6 +51,8 @@ export function tower(snapshotText, gridAgents, nowMs) {
     lastHours: null,
     bestHours: null,
     fuel: null,
+    garage: [],
+    radio: null,
   };
   let snapshot;
   try {
@@ -47,9 +61,8 @@ export function tower(snapshotText, gridAgents, nowMs) {
     return unavailable;
   }
   if (!record(snapshot) || !Array.isArray(snapshot.open_asks) || !record(snapshot.laps) ||
-      !Array.isArray(snapshot.laps.running) || !record(snapshot.scores) ||
+      !Array.isArray(snapshot.laps.running) ||
       !numberOrNull(snapshot.laps.last_hours) || !numberOrNull(snapshot.laps.best_hours) ||
-      !sectors.every(([, field]) => numberOrNull(snapshot.scores[field], 100)) ||
       !snapshot.open_asks.every((ask) => record(ask) &&
         ["id", "type", "headline", "project", "agent"].every((field) => typeof ask[field] === "string") &&
         date(ask.asked_at)) ||
@@ -57,6 +70,7 @@ export function tower(snapshotText, gridAgents, nowMs) {
         typeof lap.lap === "string" && typeof lap.title === "string" && date(lap.started_at))) {
     return unavailable;
   }
+  const scores = validScores(snapshot.scores) ? snapshot.scores : null;
   return {
     data: "ready",
     openCount: snapshot.open_asks.length,
@@ -73,7 +87,7 @@ export function tower(snapshotText, gridAgents, nowMs) {
         overdue: elapsed > 30 * 60000,
       };
     }),
-    sectors: sectors.map(([label, field]) => ({ label, value: snapshot.scores[field] })),
+    sectors: sectors.map(([label, field]) => ({ label, value: scores === null ? null : scores[field] })),
     laps: snapshot.laps.running.map((lap) => ({
       key: lap.lap,
       title: lap.title,
@@ -82,5 +96,7 @@ export function tower(snapshotText, gridAgents, nowMs) {
     lastHours: snapshot.laps.last_hours,
     bestHours: snapshot.laps.best_hours,
     fuel: validFuel(snapshot.fuel) ? snapshot.fuel : null,
+    garage: validGarage(snapshot.garage) ? snapshot.garage : [],
+    radio: validRadio(snapshot.radio) ? snapshot.radio : null,
   };
 }

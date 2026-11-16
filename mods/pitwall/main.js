@@ -53,7 +53,7 @@ export default class Pitwall extends View {
       spaceName: agent.space_name,
       status: agent.status,
     })), Date.now());
-    const section = (name, body = []) => v_flex().flex_none().px(16).py(12).gap(9)
+    const section = (name, body = []) => v_flex().flex_none().min_w(0).px(16).py(8).gap(6)
       .border_t(1).border_color(t.border)
       .child(div().font_semibold().text_size(10).text_color(t.dim).child(name))
       .children(body);
@@ -66,10 +66,12 @@ export default class Pitwall extends View {
       .child(div().flex_none().text_size(10).text_color(t.muted).child(label))
       .child(div().flex_none().font_semibold().child(value));
     const fuel = model.fuel;
+    const garageColumns = [["CI", "ci", 22], ["TEST", "tests", 32],
+      ["README", "readme", 44], ["ACTIVE", "active", 40]];
 
     return v_flex().id("pitwall-tower").size_full().min_h(0).overflow_y_scrollbar()
       .bg(t.chrome).text_color(t.foreground).text_size(12)
-      .child(v_flex().flex_none().px(16).py(16).gap(9)
+      .child(v_flex().flex_none().px(16).py(12).gap(7)
         .child(h_flex().items_center().gap(9)
           .child(div().w(3).h(20).bg(t.accent))
           .child(div().flex_1().font_bold().text_size(18).child("PIT WALL"))
@@ -122,7 +124,24 @@ export default class Pitwall extends View {
         quiet("30d, API-equivalent"),
         metric("RATIO", fuel?.value_ratio == null ? "-" : `${fuel.value_ratio.toFixed(2)}x`),
       ]))
-      .child(section("GARAGE"))
-      .child(section("RADIO"));
+      .child(section("GARAGE", model.garage.length ? [
+        h_flex().gap(5).items_center().text_size(9).text_color(t.dim)
+          .child(div().flex_1().min_w(0).child("PROJECT"))
+          .children(garageColumns.map(([label, , width]) =>
+            div().w(width).flex_none().text_center().child(label)))
+          .child(div().w(26).flex_none().text_right().child("7D")),
+        ...model.garage.map((row, index) => h_flex().id(`garage-${index}`).gap(5).items_center().text_size(11)
+          .child(div().flex_1().min_w(0).whitespace_normal().child(row.project))
+          .children(garageColumns.map(([, key, width]) => div().w(width).flex_none().text_center()
+            .text_color(row[key] ? t.working : t.blocked).child(row[key] ? "✓" : "✗")))
+          .child(div().w(26).flex_none().text_right().child(String(row.commits_7d)))),
+      ] : [quiet("No project health")]))
+      .child(section("RADIO", model.radio === null ? [quiet("No coach note")] : [
+        quiet(model.radio.date),
+        div().flex_none().min_w(0).whitespace_normal().text_size(11).line_height(1.3)
+          .child(`Observation: ${model.radio.observation}`),
+        div().flex_none().min_w(0).whitespace_normal().text_size(11).line_height(1.3)
+          .child(`Tweak: ${model.radio.tweak}`),
+      ]));
   }
 }
