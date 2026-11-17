@@ -9,12 +9,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from herdr_check import native_check
+
 
 def main():
     repo = Path(__file__).resolve().parents[1]
     source = repo / "mods/pitwall"
     herdr = shutil.which("herdr-app") or str(Path.home() / ".local/bin/herdr-app")
-    subprocess.run([herdr, "check", str(source)], check=True)
+    native_check(herdr, source)
     with tempfile.TemporaryDirectory(prefix="pitwall-check-") as scratch:
         root = Path(scratch)
         env = {**os.environ, "PITWALL_HOME": str(root / "data")}
@@ -102,7 +104,7 @@ def main():
                 '}\n'
             )
             print(f"Native fixture: {name}", flush=True)
-            subprocess.run([herdr, "check", str(folder)], check=True)
+            native_check(herdr, folder)
         print(f"OK: source and {len(fixtures)} native fixtures", flush=True)
 
 

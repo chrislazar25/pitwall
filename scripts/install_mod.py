@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from herdr_check import native_check
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -20,7 +22,7 @@ def main():
     args = parser.parse_args()
     source = Path(__file__).resolve().parents[1] / "mods/pitwall"
     herdr = shutil.which("herdr-app") or str(Path.home() / ".local/bin/herdr-app")
-    subprocess.run([herdr, "check", str(source)], check=True)
+    native_check(herdr, source)
     target = args.app_home / "mods/pitwall"
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".pitwall-install-", dir=args.app_home) as scratch:
@@ -32,7 +34,7 @@ def main():
                 os.replace(file, target / file.name)
         else:
             staged.rename(target)
-    subprocess.run([herdr, "check", str(target)], check=True)
+    native_check(herdr, target)
     print(f"Installed {target}")
     if args.dock:
         env = {**os.environ, "HERDR_APP_HOME": str(args.app_home)}
