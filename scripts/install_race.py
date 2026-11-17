@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Install the race prototype without switching layouts or changing existing layouts."""
+"""Install the race layout without switching or changing unrelated layouts."""
 
 import json
 import os
+import copy
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
+
+from herdr_check import native_check
 
 
 def main():
@@ -16,9 +18,15 @@ def main():
     source = root / "mods/racetrack"
     layout = root / "layouts/race.json"
     destination = app_home / "layouts/race.json"
-    if destination.exists() and json.loads(destination.read_text()) != json.loads(layout.read_text()):
-        raise SystemExit("race.json already exists with different content; preserve it before installing")
-    subprocess.run([herdr, "check", str(source)], check=True)
+    desired = json.loads(layout.read_text())
+    recognized = [desired]
+    for driver in ("claude", "codex"):
+        prototype = copy.deepcopy(desired)
+        prototype["children"][0]["content"]["props"] = {"demo": True, "driver": driver}
+        recognized.append(prototype)
+    if destination.exists() and json.loads(destination.read_text()) not in recognized:
+        raise SystemExit("race.json has custom changes; preserve it before installing")
+    native_check(herdr, source)
     target = app_home / "mods/racetrack"
     target.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".race-install-", dir=app_home) as scratch:
@@ -32,7 +40,7 @@ def main():
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(layout, staged / "race.json")
         os.replace(staged / "race.json", destination)
-    subprocess.run([herdr, "check", str(target)], check=True)
+    native_check(herdr, target)
     print(f"Installed {target} and {destination}")
 
 

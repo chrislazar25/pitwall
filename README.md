@@ -22,7 +22,7 @@ pit ask --type decide|review|unblock|taste|context|teach --agent A --headline H 
 pit answer ID --answer TEXT --took-default yes|no|na [--not-needed]
 pit reopen ID
 pit control --action pause|cancel|reprioritize|revoke --agent A [--note TEXT]
-pit lap start --title TEXT
+pit lap start --title TEXT [--agent NAME]
 pit lap ship ID
 pit concept add NAME [--must-own] | must-own NAME | pass NAME | override NAME --reason TEXT | list
 pit open
@@ -121,17 +121,36 @@ Scores, garage data, and accepted notes survive later asks and state rebuilds. S
 
 The daily 08:23 local-time score, health, and coach job requires explicit approval before installation. It preserves the existing hourly usage job. The full track-and-pit visual theme is a separate proposed pass.
 
-## Race prototype
+## Race layout
 
-Phase 5 Step A is a disposable circuit prototype. Install it with
-`python3 scripts/install_race.py`, then run
-`herdr-app do layout.switch '{"name":"race"}'`. The new layout shows a demo
-car above the focused real terminal, with the Pit tower in a right drawer.
-Your existing layouts and keys are preserved. The prototype advances 2%
-every two seconds; it does not represent task progress or live lap state.
-Use `props.driver: "codex"` in the race track block for the blue Codex livery.
-The default is the orange and cream Claude car.
+Chris accepted the circuit in Phase 5 Step A. Install the live race view with
+`python3 scripts/install_mod.py` and `python3 scripts/install_race.py`, then run
+`herdr-app do layout.switch '{"name":"race"}'`. The new layout shows laps above
+the focused agent's real terminal, with the Pit tower in a right drawer.
+Existing layouts and keys are preserved. The race installer recognizes the
+accepted prototype but refuses to overwrite custom layout changes.
 
-Chris chooses the circuit or straight speedway after watching the demo.
-Steps B and C wait for that decision. See [PHASE5.md](PHASE5.md) for the
-remaining data, interaction, and acceptance requirements.
+Start attributed work with `pit lap start --agent codex --title "short title"`.
+Driver entries in `~/.pitwall/config.json` map Pit names to observed Herdr
+program keys, colors, and tyres. Claude uses `claude` and Codex uses `codex`.
+GLM has not been observed, so its program stays null and it has no terminal link.
+Existing laps without an agent remain visible and unlinked.
+
+Car position is elapsed time divided by shipping pace. It is a clock, not task
+progress. Pace is the median of the first ten shipped laps, or four hours until
+then. Open asks place matching cars in the pit. Clicking a linked car or garage
+icon focuses its real terminal. The latest ten-minute finishes remain visible.
+The flag bar prioritizes overdue asks, no working agents, recent finishes, then
+green. Its pit-stop times use the latest answer per ask, dated locally today.
+
+The tower owns ask sounds and the Dock badge. It requires Herdr's `checking()`
+and `setBadge()` APIs and suppresses both effects if either is unavailable.
+The first valid load establishes a silent baseline. Later new ask IDs play one
+blocked sound per load. Duplicate tower copies coordinate through shared state;
+stale event snapshots cannot replay notifications. An invalid read preserves the
+previous notification baseline and badge.
+
+The initial installed Herdr 0.1.15 lacks those two APIs. Herdr's cached 0.1.16
+release notes advertise them. Sound, Dock badge, and the user acceptance checks
+remain pending until the host supports them. See [PHASE5.md](PHASE5.md) for the
+complete behavior and acceptance requirements.

@@ -1,11 +1,13 @@
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { agents, theme, home, readTextFile, watchFolder, placement } from "herdr";
-import { tower } from "./model.js";
+import * as herdr from "herdr";
+import { tower, attention } from "./model.js";
 
 export default class Pitwall extends View {
   init(_props, cx) {
     this.snapshotText = null;
+    this.attentionInitialized = false;
     this.readVersion = 0;
     this.watchRunning = false;
     this.directory = home() + "/.pitwall";
@@ -25,7 +27,21 @@ export default class Pitwall extends View {
     } catch {}
     if (version !== this.readVersion) return;
     this.snapshotText = text;
+    this.updateAttention(text);
     cx.notify();
+  }
+
+  updateAttention(text) {
+    if (typeof herdr.checking !== "function" || typeof herdr.setBadge !== "function" ||
+        herdr.checking()) return;
+    const next = attention(herdr.shared("pitwall.attention.v1"), text, {
+      refreshBadge: !this.attentionInitialized,
+    });
+    if (!next.accepted) return;
+    this.attentionInitialized = true;
+    herdr.setShared("pitwall.attention.v1", next.state);
+    if (next.writeBadge) herdr.setBadge(next.state.badge);
+    if (next.sound) herdr.playSound("blocked");
   }
 
   startWatcher(cx) {
@@ -80,7 +96,9 @@ export default class Pitwall extends View {
           .child(div().px(8).py(4).rounded(3).bg(t.raised).font_semibold().text_size(10)
             .text_color(model.openCount > 0 ? t.blocked : t.muted)
             .child(`IN PIT ${model.openCount ?? "-"}`)))
-        .when(model.data === "no-data", (el) => el.child(quiet("NO DATA"))))
+        .when(model.data === "no-data", (el) => el.child(quiet("NO DATA")))
+        .when(typeof herdr.checking !== "function" || typeof herdr.setBadge !== "function",
+          (el) => el.child(quiet("Herdr update required for sound and Dock badge"))))
       .child(section("GRID", model.grid.length ? model.grid.map((agent) =>
         h_flex().id(`grid-${agent.key}`).items_center().gap(8).py(3)
           .child(div().w(22).flex_none().text_color(t.dim).child(String(agent.position).padStart(2, "0")))
@@ -106,7 +124,7 @@ export default class Pitwall extends View {
         h_flex().id(`sector-${sector.label}`).items_center().gap(12)
           .child(div().w(48).flex_none().text_size(10).text_color(t.muted).child(sector.label))
           .child(div().w(100).h(4).flex_none().rounded(2).bg(t.raised)
-            .child(div().w(sector.value ?? 0).h(4).rounded(2).bg(t.accent)))
+            .child(div().w(sector.value ?? 0).h(4).rounded(2).bg(({ best: "#a855f7", up: "#22c55e", down: "#eab308" })[sector.trend] ?? t.muted)))
           .child(h_flex().flex_1().justify_end().text_size(11).child(sector.value === null ? "-" : String(sector.value))))))
       .child(section("LAPS", model.data === "no-data" ? [quiet("NO DATA")] : [
         ...model.laps.map((lap) => h_flex().id(`lap-${lap.key}`).items_center().gap(8)

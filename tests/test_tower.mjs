@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { tower } from "../mods/pitwall/model.js";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+import { tower, attention } from "../mods/pitwall/model.js";
 
 const now = Date.parse("2026-11-16T20:00:00Z");
 const grid = [
@@ -59,7 +61,7 @@ test("valid empty data displays zero asks and legitimate null scores and lap sum
   assert.equal(result.fuel, null);
   assert.deepEqual(result.garage, []);
   assert.equal(result.radio, null);
-  assert.deepEqual(result.sectors, ["SPEED", "ASKS", "SHIP", "OWN"].map((label) => ({ label, value: null })));
+  assert.deepEqual(result.sectors, ["SPEED", "ASKS", "SHIP", "OWN"].map((label) => ({ label, value: null, trend: null })));
 });
 
 test("malformed queue or lap fields make the snapshot unavailable", () => {
@@ -135,8 +137,8 @@ test("sectors read the actual projection field names and accept the legacy fuel 
   assert.deepEqual(result.garage, []);
   assert.equal(result.radio, null);
   assert.deepEqual(result.sectors, [
-    { label: "SPEED", value: 0 }, { label: "ASKS", value: 25 },
-    { label: "SHIP", value: 62.5 }, { label: "OWN", value: 100 },
+    { label: "SPEED", value: 0, trend: null }, { label: "ASKS", value: 25, trend: null },
+    { label: "SHIP", value: 62.5, trend: null }, { label: "OWN", value: 100, trend: null },
   ]);
 });
 
@@ -266,4 +268,101 @@ test("invalid optional analytics degrade independently and preserve the core que
   }
   const degraded = view({ ...state, garage: 5, radio: false, scores: [] });
   assert.deepEqual(degraded, view({ ...state, garage: [], radio: null, scores: empty().scores }));
+});
+
+test("sector trends preserve the prescribed meanings and degrade unknown values", () => {
+  const state = empty();
+  state.scores_trend = { speed: "best", ask_quality: "up", shipping: "down", ownership: "flat" };
+  assert.deepEqual(view(state).sectors.map((sector) => sector.trend), ["best", "up", "down", "flat"]);
+  state.scores_trend = { speed: "unknown", ask_quality: 3 };
+  assert.ok(view(state).sectors.every((sector) => sector.trend === null));
+});
+
+const attentionText = (event_count, ids) => JSON.stringify({ ...empty(), event_count,
+  open_asks: ids.map((id) => ask(id, "2026-11-16T19:00:00Z")) });
+
+test("attention establishes a silent first load, claims new ids once, and clears at zero", () => {
+  const initial = attention(null, attentionText(1, ["old"]));
+  assert.deepEqual(initial, { accepted: true, sound: false, writeBadge: true,
+    state: { eventCount: 1, openIds: ["old"], badge: 1 } });
+  const unchanged = attention(initial.state, attentionText(2, ["old"]));
+  assert.equal(unchanged.sound, false);
+  assert.equal(unchanged.writeBadge, false);
+  const two = attention(unchanged.state, attentionText(3, ["old", "new", "another"]));
+  assert.equal(two.sound, true);
+  assert.equal(two.state.badge, 3);
+  assert.equal(attention(two.state, attentionText(3, ["old", "new", "another"])).accepted, false);
+  const closed = attention(two.state, attentionText(4, []));
+  assert.equal(closed.sound, false);
+  assert.equal(closed.writeBadge, true);
+  assert.equal(closed.state.badge, null);
+  assert.equal(attention(closed.state, attentionText(5, ["old"])).sound, true);
+});
+
+test("attention ignores malformed and stale reads without changing the prior baseline", () => {
+  const prior = attention(null, attentionText(10, ["open"])).state;
+  for (const invalid of [null, "{", "{}", attentionText(9, []), attentionText(10, []),
+    attentionText(-1, []), attentionText(1.5, []), JSON.stringify(empty())]) {
+    assert.deepEqual(attention(prior, invalid), { state: prior, accepted: false, sound: false, writeBadge: false });
+  }
+  assert.equal(attention(prior, attentionText(11, ["open", "new"])).sound, true);
+  const zero = attention(null, attentionText(0, []));
+  assert.equal(zero.state.badge, null);
+  assert.equal(zero.writeBadge, true);
+});
+
+test("fresh views refresh the current shared badge without replaying sound or accepting stale data", () => {
+  const prior = attention(null, attentionText(10, ["open"])).state;
+  assert.deepEqual(attention(prior, attentionText(10, ["open"]), { refreshBadge: true }), {
+    state: prior, accepted: true, sound: false, writeBadge: true,
+  });
+  assert.equal(attention(prior, attentionText(9, []), { refreshBadge: true }).accepted, false);
+  assert.equal(attention(prior, "{", { refreshBadge: true }).accepted, false);
+});
+
+function nativeTower(api) {
+  const source = readFileSync(new URL("../mods/pitwall/main.js", import.meta.url), "utf8")
+    .replace(/^import .*;\n/gm, "").replace("export default class Pitwall", "class Pitwall");
+  const Tower = vm.runInNewContext(source + "; Pitwall", { herdr: api, attention, View: class {} });
+  return new Tower();
+}
+
+test("native attention fails closed before shared access when checking is absent or true", () => {
+  const forbidden = () => assert.fail("native check must not touch shared state or effects");
+  for (const capabilities of [{}, { checking: () => true, setBadge: forbidden },
+    { checking: () => false }]) {
+    const view = nativeTower({ shared: forbidden, setShared: forbidden, playSound: forbidden,
+      ...capabilities });
+    view.updateAttention(attentionText(1, ["new"]));
+  }
+});
+
+test("native attention claims shared state before effects and coordinates mounted views", () => {
+  let shared = null;
+  const calls = [];
+  const api = {
+    checking: () => false,
+    shared: () => shared,
+    setShared: (_key, value) => { shared = value; calls.push(["claim", value.eventCount]); },
+    setBadge: (badge) => { assert.equal(shared.badge, badge); calls.push(["badge", badge]); },
+    playSound: (sound) => { assert.equal(shared.eventCount, 2); calls.push(["sound", sound]); },
+  };
+  const first = nativeTower(api);
+  first.updateAttention(attentionText(1, []));
+  assert.deepEqual(calls, [["claim", 1], ["badge", null]]);
+  calls.length = 0;
+  first.updateAttention(attentionText(2, ["a", "b"]));
+  assert.deepEqual(calls, [["claim", 2], ["badge", 2], ["sound", "blocked"]]);
+  calls.length = 0;
+  const second = nativeTower(api);
+  second.updateAttention(attentionText(1, []));
+  assert.deepEqual(calls, []);
+  second.updateAttention("{");
+  assert.deepEqual(calls, []);
+  second.updateAttention(attentionText(2, ["a", "b"]));
+  assert.deepEqual(calls, [["claim", 2], ["badge", 2]]);
+  calls.length = 0;
+  first.updateAttention(attentionText(2, ["a", "b"]));
+  second.updateAttention(attentionText(2, ["a", "b"]));
+  assert.deepEqual(calls, []);
 });

@@ -46,7 +46,7 @@ export function tower(snapshotText, gridAgents, nowMs) {
     openCount: null,
     grid,
     asks: [],
-    sectors: sectors.map(([label]) => ({ label, value: null })),
+    sectors: sectors.map(([label]) => ({ label, value: null, trend: null })),
     laps: [],
     lastHours: null,
     bestHours: null,
@@ -87,7 +87,9 @@ export function tower(snapshotText, gridAgents, nowMs) {
         overdue: elapsed > 30 * 60000,
       };
     }),
-    sectors: sectors.map(([label, field]) => ({ label, value: scores === null ? null : scores[field] })),
+    sectors: sectors.map(([label, field]) => ({ label, value: scores === null ? null : scores[field],
+      trend: ["best", "up", "down", "flat"].includes(snapshot.scores_trend?.[field])
+        ? snapshot.scores_trend[field] : null })),
     laps: snapshot.laps.running.map((lap) => ({
       key: lap.lap,
       title: lap.title,
@@ -98,5 +100,28 @@ export function tower(snapshotText, gridAgents, nowMs) {
     fuel: validFuel(snapshot.fuel) ? snapshot.fuel : null,
     garage: validGarage(snapshot.garage) ? snapshot.garage : [],
     radio: validRadio(snapshot.radio) ? snapshot.radio : null,
+  };
+}
+
+/** Successful reads advance the shared attention claim before native effects run. */
+export function attention(previous, snapshotText, { refreshBadge = false } = {}) {
+  const ignored = { state: previous, accepted: false, sound: false, writeBadge: false };
+  if (tower(snapshotText, [], 0).data !== "ready") return ignored;
+  const snapshot = JSON.parse(snapshotText);
+  if (!tokens(snapshot.event_count)) return ignored;
+  const prior = record(previous) && tokens(previous.eventCount) &&
+    Array.isArray(previous.openIds) && previous.openIds.every((id) => typeof id === "string")
+    ? previous : null;
+  if (prior !== null && snapshot.event_count < prior.eventCount) return ignored;
+  if (prior !== null && snapshot.event_count === prior.eventCount) {
+    return refreshBadge ? { state: prior, accepted: true, sound: false, writeBadge: true } : ignored;
+  }
+  const openIds = [...new Set(snapshot.open_asks.map((ask) => ask.id))];
+  const badge = openIds.length || null;
+  return {
+    state: { eventCount: snapshot.event_count, openIds, badge },
+    accepted: true,
+    sound: prior !== null && openIds.some((id) => !prior.openIds.includes(id)),
+    writeBadge: prior === null || badge !== prior.badge,
   };
 }

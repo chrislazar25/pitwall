@@ -1,6 +1,8 @@
-import { View, div, image } from "gpui-kit";
+import { View, div, image, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { agents, theme, props } from "herdr";
+import { agents, theme, props, home, readTextFile, watchFolder, run } from "herdr";
+
+import { race, RATING_COLORS } from "./model.js";
 
 export const VIEWBOX = { width: 1000, height: 500 };
 
@@ -62,40 +64,72 @@ export function fitCircuit(width, height) {
 
 export default class Racetrack extends View {
   init(_props, cx) {
-    const config = props();
-    this.demo = config?.demo === true;
-    this.driver = config?.driver === "codex" ? "codex" : "claude";
-    this.assetRoot = config?.assetRoot ?? "mods/racetrack";
-    this.fraction = 0;
+    this.assetRoot = props()?.assetRoot ?? "mods/racetrack";
+    this.snapshotText = null;
+    this.readVersion = 0;
+    this.watchRunning = false;
     this.size = { width: 1000, height: 600 };
-    if (this.demo) {
-      cx.timer.every(2000, (cx) => {
-        this.fraction = (this.fraction + 0.02) % 1;
-        cx.notify();
-      });
-    }
+    this.directory = home() + "/.pitwall";
+    cx.spawn(async (cx) => this.reload(cx));
+    this.startWatcher(cx);
+    cx.timer.every(60000, (cx) => {
+      cx.spawn(async (cx) => this.reload(cx));
+      this.startWatcher(cx);
+      cx.notify();
+    });
+  }
+
+  async reload(cx) {
+    const version = ++this.readVersion;
+    let text = null;
+    try { text = await readTextFile(this.directory + "/state.json"); } catch {}
+    if (version !== this.readVersion) return;
+    this.snapshotText = text;
+    cx.notify();
+  }
+
+  startWatcher(cx) {
+    if (this.watchRunning) return;
+    this.watchRunning = true;
+    cx.spawn(async (cx) => {
+      for (;;) {
+        try { await watchFolder(this.directory); }
+        catch { this.watchRunning = false; break; }
+        await this.reload(cx);
+      }
+      cx.notify();
+    });
   }
 
   render() {
     const t = theme();
     const bounds = fitCircuit(this.size.width, this.size.height);
-    const point = pointAtFraction(this.fraction);
     const s = bounds.scale;
+    const assetRoot = this.assetRoot ?? "mods/racetrack";
+    const model = race(this.snapshotText, agents().map((agent) => ({
+      key: agent.address, programKey: agent.program.key, programName: agent.program.name,
+      spaceName: agent.space_name, status: agent.status,
+    })), Date.now());
+    const flagColor = ({ yellow: t.ansi3, red: t.ansi1, green: t.ansi2 })[model.flag] ?? t.foreground;
+    const focus = (terminal) => { if (terminal !== null) run("agent.focus", { terminal }); };
+    const carArt = (car) => {
+      const details = car.driver === "codex" ? "car-codex-details.svg" :
+        car.driver === "glm-flash" ? "car-flash-details.svg" : "car-details.svg";
+      return div().relative().w(44 * s).h(26 * s)
+        .child(svg(`${assetRoot}/car-body.svg`).absolute().left(0).top(0).w(44 * s).h(26 * s)
+          .text_color(car.livery ?? t.muted))
+        .child(image(`${assetRoot}/${details}`).absolute().left(0).top(0).w(44 * s).h(26 * s))
+        .when(car.tyreColor !== null, (el) => el.child(div().absolute().left(11 * s).top(1 * s)
+          .w(5 * s).h(5 * s).rounded_full().bg(car.tyreColor)));
+    };
+    const finished = model.cars.filter((car) => car.mode === "finished");
     const labels = [
       [539, 37, "START / FINISH", 11, t.muted],
-      [713, 149, "01", 12, t.dim],
-      [816, 321, "02", 12, t.dim],
-      [183, 359, "03", 12, t.dim],
-      [256, 232, "GARAGE", 14, t.foreground],
-      [256, 257, "PADDOCK / 06 BAYS", 9, t.muted],
-      [433, 272, "PIT BOXES", 10, t.muted],
-      [520, 350, "PIT LANE", 10, t.muted],
-      [433, 219, "PIT WALL", 28, t.foreground],
-      [434, 251, "CIRCUIT STUDY  /  01", 10, t.dim],
+      [713, 149, "01", 12, t.dim], [816, 321, "02", 12, t.dim], [183, 359, "03", 12, t.dim],
+      [256, 232, "GARAGE", 14, t.foreground], [433, 272, "PIT BOXES", 10, t.muted],
+      [520, 350, "PIT LANE", 10, t.muted], [433, 219, "PIT WALL", 28, t.foreground],
+      [434, 251, "ELAPSED TIME / PACE", 10, t.dim],
     ];
-    const observed = agents().map((a) => `${a.program.key} · ${a.program.name} · ${a.address}`);
-    const driverName = this.driver === "codex" ? "Codex" : "Claude";
-    const car = this.driver === "codex" ? "car-codex.svg" : "car.svg";
     return div().id("racetrack-root").relative().size_full().overflow_hidden()
       .bg(t.background).text_color(t.foreground)
       .on_size_change((size, cx) => {
@@ -105,31 +139,55 @@ export default class Racetrack extends View {
       })
       .child(h_flex().absolute().left(0).top(0).w_full().h(28).px(14).gap(10)
         .items_center().bg(t.chrome).border_b(1).border_color(t.border)
-        .child(div().w(4).h(12).bg("#dc916b"))
-        .child(div().font_bold().text_size(10).child(this.demo ? "DEMO" : "CIRCUIT PREVIEW"))
-        .child(div().flex_1().text_size(10).text_color(t.muted).child("RACETRACK PROTOTYPE"))
+        .child(div().w(4).h(12).bg(flagColor))
+        .child(div().font_bold().text_size(10).text_color(flagColor)
+          .child(model.flag === "chequered" ? "▦ CHEQUERED" : (model.flag ?? "NO DATA").toUpperCase()))
+        .child(div().flex_1().text_size(10).text_color(t.muted).child("RACE CONTROL"))
         .child(div().font_semibold().text_size(10).text_color(t.muted)
-          .child(this.demo ? `LAP ${String(Math.round(this.fraction * 100)).padStart(2, "0")}%` : "STATIC")))
+          .child(`FASTEST PIT TODAY ${model.fastestPitMinutes === null ? "-" : model.fastestPitMinutes.toFixed(1) + "m"}`)))
       .child(div().absolute().left(bounds.left).top(bounds.top).w(bounds.width).h(bounds.height)
-        .child(image(`${this.assetRoot}/track.svg`).absolute().left(0).top(0).w(bounds.width).h(bounds.height))
+        .child(image(`${assetRoot}/track.svg`).absolute().left(0).top(0).w(bounds.width).h(bounds.height))
         .children(labels.map(([x, y, label, fontSize, color]) =>
           div().absolute().left(x * s).top(y * s).text_size(fontSize * s)
             .font_semibold().text_color(color).child(label)))
-        .children(Array.from({ length: 6 }, (_, i) => div().absolute()
-          .left((451 + i * 48) * s).top(303 * s).text_size(10 * s)
-          .text_color(t.muted).child(String(i + 1).padStart(2, "0"))))
-        .when(this.demo, (el) => el.child(div().id("racetrack-demo-car").absolute()
-          .left((point.x - 22) * s).top((point.y - 13) * s).w(44 * s).h(26 * s)
-          .transition("left", { duration: 2000, easing: "linear" })
-          .transition("top", { duration: 2000, easing: "linear" })
-          .child(image(`${this.assetRoot}/${car}`).w(44 * s).h(26 * s)))))
-      .child(v_flex().absolute().left(16).top(34)
+        .children(Array.from({ length: 6 }, (_, bay) => div().id(`pit-bay-${bay}`).absolute()
+          .left((433 + bay * 48) * s).top(291 * s).w(40 * s).h(30 * s)
+          .when(model.cars.some((car) => car.mode === "pit" && car.bay === bay), (el) =>
+            el.border(2).border_color(t.blocked).loop("opacity", { from: 0.4, to: 1, period: 1800 }))
+          .child(div().absolute().left(15 * s).top(32 * s).text_size(9 * s).text_color(t.muted)
+            .child(String(bay + 1).padStart(2, "0")))))
+        .children(model.garage.map((agent, index) => div().id(`garage-${agent.key}`).absolute()
+          .left((243 + (index % 2) * 75) * s).top((270 + Math.floor(index / 2) * 39) * s)
+          .w(Math.max(45, 42 * s)).h(Math.max(34, 34 * s)).on_click(() => focus(agent.key))
+          .child(div().w(17 * s).h(10 * s).rounded(3 * s).bg(t[agent.status] ?? t.muted))
+          .child(div().text_size(9).text_color(t.muted).child(agent.programName ?? agent.programKey))))
+        .children(model.cars.map((car, index) => {
+          const point = car.mode === "track" ? pointAtFraction(car.fraction) :
+            car.mode === "pit" ? { x: 453 + car.bay * 48, y: 306 - car.stack * 44 } :
+              { x: 510 + (finished.indexOf(car) % 4) * 60,
+                y: 90 + Math.floor(finished.indexOf(car) / 4) * 50 };
+          const labelColor = car.mode === "finished" ? RATING_COLORS[car.rating] : t.foreground;
+          return div().id(`car-${car.key}`).absolute()
+            .left((point.x - 22) * s).top((point.y - 13) * s).w(Math.max(120, 110 * s)).h(Math.max(48, 46 * s))
+            .transition("left", { duration: 1200, easing: "linear" })
+            .transition("top", { duration: 1200, easing: "linear" })
+            .on_click(() => focus(car.terminal))
+            .when(car.mode === "pit", (el) => el.loop("opacity", { from: 0.5, to: 1, period: 1800 }))
+            .child(carArt(car))
+            .child(h_flex().mt((index % 3) * 12).gap(3 * s).items_center()
+              .child(div().max_w(120).truncate().text_size(9).font_semibold()
+                .text_color(labelColor).child(car.title))
+              .when(car.mode !== "finished" && car.completedLaps > 0, (el) =>
+                el.child(div().text_size(9).text_color("#eab308").child(`+${car.completedLaps}`))))
+            .when(car.mode === "pit", (el) => el.child(div().text_size(9)
+              .text_color(t.blocked).child(`${car.waitingMinutes}m waiting`)))
+            .when(car.mode === "finished", (el) => el.child(div().text_size(9)
+              .text_color(labelColor).child(`${car.hours.toFixed(2)}h`)));
+        })))
+      .child(v_flex().absolute().left(16).top(Math.max(28, this.size.height - 56))
         .w(Math.max(0, this.size.width - 32)).gap(5).text_size(10)
-        .child(h_flex().gap(8).items_center()
-          .child(div().w(7).h(7).rounded_full().bg(this.driver === "codex" ? "#6aa5ef" : "#dc916b"))
-          .child(div().font_semibold().child(this.demo ? `${driverName} · demo car` : "Static circuit preview"))
-          .child(div().flex_1().text_color(t.dim).child(this.demo ? "+2% every 2 seconds · native motion" : "Enable with demo = true")))
-        .child(div().text_color(t.dim).child("OBSERVED AGENT PROGRAMS"))
-        .child(div().text_color(t.muted).child(observed.length ? observed.join("    /    ") : "No agents observed")));
+        .child(div().text_color(t.muted).child(model.data === "no-data" ? "Race data unavailable" :
+          `${model.cars.filter((car) => car.mode === "track").length} ON TRACK · ${model.cars.filter((car) => car.mode === "pit").length} IN PIT · ${model.garage.length} IN GARAGE`))
+        .child(div().text_color(t.dim).child("Clock position is elapsed time, not progress. Click a linked car or garage icon for onboard.")));
   }
 }
