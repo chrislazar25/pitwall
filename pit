@@ -6,6 +6,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -78,7 +79,7 @@ def load_json(path, default):
 # The state is a fold over the event log. Each kind has one reducer.
 
 def fresh_model():
-    return {"asks": {}, "laps": {}, "concepts": {}}
+    return {"asks": {}, "laps": {}, "concepts": {}, "event_count": 0}
 
 
 def on_ask(m, e):
@@ -88,7 +89,7 @@ def on_ask(m, e):
 def on_answer(m, e):
     ask = m["asks"][e["id"]]
     ask["open"] = False
-    ask["answers"].append(e)
+    ask["answers"].append({**e, "event_order": m["event_count"]})
 
 
 def on_reopen(m, e):
@@ -102,7 +103,9 @@ def on_lap_start(m, e):
 
 
 def on_lap_ship(m, e):
-    m["laps"][e["lap"]]["shipped_at"] = e["ts"]
+    lap = m["laps"][e["lap"]]
+    lap["shipped_at"] = e["ts"]
+    lap["ship_order"] = m["event_count"]
 
 
 def on_concept(m, e):
@@ -123,33 +126,87 @@ REDUCERS = {
 def build_model(events):
     m = fresh_model()
     for e in events:
+        m["event_count"] += 1
         REDUCERS[e["kind"]](m, e)
     return m
 
 
-def build_state(m):
+def ordered_shipped(m, at):
+    return sorted((lap for lap in m["laps"].values()
+                   if lap["shipped_at"] and parse_ts(lap["shipped_at"]) <= at),
+                  key=lambda lap: (lap["shipped_at"], lap["ship_order"]))
+
+
+def lap_duration_seconds(lap):
+    return Decimal(str((parse_ts(lap["shipped_at"]) - parse_ts(lap["ts"])).total_seconds()))
+
+
+def shipping_baseline(shipped):
+    return median([lap_duration_seconds(lap) for lap in shipped[:10]]) if len(shipped) >= 10 else None
+
+
+def project_laps(m, at):
+    running = [
+        {"lap": lap["lap"], "project": lap["project"], "title": lap["title"],
+         "started_at": lap["ts"], "agent": lap.get("agent")}
+        for lap in m["laps"].values()
+        if lap["shipped_at"] is None and parse_ts(lap["ts"]) <= at
+    ]
+    shipped = ordered_shipped(m, at)
+    baseline = shipping_baseline(shipped)
+    results, best = [], None
+    for index, lap in enumerate(shipped):
+        duration = lap_duration_seconds(lap)
+        pace = baseline if index >= 9 else Decimal(4 * 3600)
+        rating = ("best" if best is None or duration <= best
+                  else "good" if duration < pace else "slow")
+        best = duration if best is None else min(best, duration)
+        results.append({"lap": lap["lap"], "project": lap["project"], "title": lap["title"],
+                        "agent": lap.get("agent"), "hours": hours_between(lap["ts"], lap["shipped_at"]),
+                        "shipped_at": lap["shipped_at"], "rating": rating})
+    return {
+        "running": running,
+        "pace_hours": float(baseline / 3600) if baseline is not None else 4,
+        "last": results[-1] if results else None,
+        "finished": [result for result in results
+                     if at - parse_ts(result["shipped_at"]) <= timedelta(minutes=10)],
+        "last_hours": results[-1]["hours"] if results else None,
+        "best_hours": round(float(best / 3600), 2) if best is not None else None,
+        "shipped_total": len(shipped),
+    }
+
+
+def project_pit_stops(m, at):
+    stops = []
+    for ask in m["asks"].values():
+        answers = [answer for answer in ask["answers"] if parse_ts(answer["ts"]) <= at]
+        if not answers:
+            continue
+        answer = max(answers, key=lambda e: (e["ts"], e["event_order"]))
+        answered_at = parse_ts(answer["ts"])
+        if answered_at.astimezone().date() == at.astimezone().date():
+            minutes = (answered_at - parse_ts(ask["ts"])).total_seconds() / 60
+            stops.append((answered_at, answer["event_order"], minutes))
+    return {"fastest_today_minutes": min(stop[2] for stop in stops) if stops else None,
+            "last_minutes": max(stops)[2] if stops else None}
+
+
+def build_state(m, at=None):
+    at = at or parse_ts(now())
     open_asks = [
         {"id": a["id"], "type": a["type"], "agent": a["agent"], "project": a["project"],
-         "headline": a["headline"], "asked_at": a["ts"]}
-        for a in m["asks"].values() if a["open"]
+         "headline": a["headline"], "asked_at": a["ts"], "lap": a.get("lap")}
+        for a in m["asks"].values() if a["open"] and parse_ts(a["ts"]) <= at
     ]
-    running = [
-        {"lap": l["lap"], "project": l["project"], "title": l["title"], "started_at": l["ts"]}
-        for l in m["laps"].values() if l["shipped_at"] is None
-    ]
-    shipped = sorted((l for l in m["laps"].values() if l["shipped_at"]),
-                     key=lambda l: l["shipped_at"])
-    lengths = [hours_between(l["ts"], l["shipped_at"]) for l in shipped]
     return {
-        "generated_at": now(),
+        "generated_at": at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "event_count": m["event_count"],
+        "drivers": {},
         "open_asks": open_asks,
-        "laps": {
-            "running": running,
-            "last_hours": lengths[-1] if lengths else None,
-            "best_hours": min(lengths) if lengths else None,
-            "shipped_total": len(shipped),
-        },
+        "laps": project_laps(m, at),
+        "pit_stops": project_pit_stops(m, at),
         "scores": dict.fromkeys(SCORE_KEYS),
+        "scores_trend": dict.fromkeys(SCORE_KEYS),
         "fuel": None,
         "garage": [],
         "radio": None,
@@ -157,7 +214,8 @@ def build_state(m):
 
 
 def rebuild_state():
-    state = build_state(build_model(read_events()))
+    at = parse_ts(now())
+    state = build_state(build_model(read_events()), at)
     daily = data_dir() / "usage" / "daily.json"
     if daily.exists():
         try:
@@ -165,11 +223,13 @@ def rebuild_state():
             state["fuel"] = calculate_fuel(rows, read_ledger(), date.today())
         except BadInput as err:
             print(f"pit: fuel unavailable: {err}", file=sys.stderr)
-    for section, reader in (("scores", read_scores), ("garage", read_garage), ("radio", read_radio)):
+    for section, reader in (("scores", lambda: read_scores(at.astimezone().date())),
+                            ("drivers", read_drivers), ("garage", read_garage), ("radio", read_radio)):
         try:
             value = reader()
             if section == "scores":
                 state[section] = {k: value[-1][k] for k in SCORE_KEYS} if value else dict.fromkeys(SCORE_KEYS)
+                state["scores_trend"] = calculate_scores_trend(value)
             else:
                 state[section] = value
         except BadInput as err:
@@ -261,7 +321,8 @@ def cmd_control(a, m, project):
 
 
 def cmd_lap_start(a, m, project):
-    e = append({"kind": "lap_start", "lap": new_id("l"), "project": project, "title": a.title})
+    e = append({"kind": "lap_start", "lap": new_id("l"), "project": project,
+                "title": a.title, "agent": a.agent})
     print(e["lap"])
 
 
@@ -533,13 +594,11 @@ def calculate_scores(events, at):
         scores["speed"] = 100 * (120 - median(waits)) / 115
         scores["ask_quality"] = Decimal(100) * sum(
             answer["needed"] and not ask["reopened"] for ask, answer in cohort) / len(cohort)
-    ship_order = {e["lap"]: index for index, e in enumerate(past) if e["kind"] == "lap_ship"}
-    shipped = sorted((lap for lap in model["laps"].values() if lap["shipped_at"]),
-                     key=lambda lap: (lap["shipped_at"], ship_order[lap["lap"]]))
-    duration = lambda lap: Decimal(str((parse_ts(lap["shipped_at"]) - parse_ts(lap["ts"])).total_seconds()))
-    current = [duration(lap) for lap in shipped if cutoff <= parse_ts(lap["shipped_at"]) <= at]
-    if len(shipped) >= 10 and current:
-        baseline, recent = median([duration(lap) for lap in shipped[:10]]), median(current)
+    shipped = ordered_shipped(model, at)
+    baseline = shipping_baseline(shipped)
+    current = [lap_duration_seconds(lap) for lap in shipped if cutoff <= parse_ts(lap["shipped_at"]) <= at]
+    if baseline is not None and current:
+        recent = median(current)
         scores["shipping"] = 50 * baseline / recent if recent else (Decimal(100) if baseline > 0 else None)
     concepts = [c for c in model["concepts"].values() if c["must_own"]]
     if concepts:
@@ -573,6 +632,43 @@ def read_scores(today=None):
         except (ValueError, BadInput) as err:
             print(f"pit: scores.jsonl line {number} ignored: {err}", file=sys.stderr)
     return [by_date[day] for day in sorted(by_date)]
+
+
+def calculate_scores_trend(rows):
+    trends = dict.fromkeys(SCORE_KEYS)
+    if len(rows) < 2:
+        return trends
+    for key in SCORE_KEYS:
+        current, previous = rows[-1][key], rows[-2][key]
+        if current is None:
+            continue
+        if current == max(row[key] for row in rows if row[key] is not None):
+            trends[key] = "best"
+        elif previous is not None:
+            trends[key] = "up" if current > previous else "down" if current < previous else "flat"
+    return trends
+
+
+def read_drivers():
+    path = data_dir() / "config.json"
+    config = read_usage_json(path) if path.exists() else {}
+    if not isinstance(config, dict):
+        raise BadInput("config must be an object")
+    drivers = config.get("drivers", {})
+    if not isinstance(drivers, dict):
+        raise BadInput("drivers must be an object")
+    for name, driver in drivers.items():
+        if not isinstance(name, str) or not name.strip() or not isinstance(driver, dict):
+            raise BadInput("driver names must be nonempty strings and entries must be objects")
+        if set(driver) != {"program", "color", "tyre"}:
+            raise BadInput(f"driver {name} needs program, color and tyre")
+        if driver["program"] is not None and (not isinstance(driver["program"], str) or not driver["program"].strip()):
+            raise BadInput(f"driver {name} program must be a nonempty string or null")
+        if not isinstance(driver["color"], str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", driver["color"]):
+            raise BadInput(f"driver {name} color must be #RRGGBB")
+        if driver["tyre"] not in ("soft", "medium", "hard"):
+            raise BadInput(f"driver {name} tyre must be soft, medium or hard")
+    return drivers
 
 
 def read_garage():
@@ -815,6 +911,7 @@ def build_parser():
         dest="lap_cmd", required=True, parser_class=Parser)
     s = lap.add_parser("start")
     s.add_argument("--title", required=True)
+    s.add_argument("--agent")
     s.set_defaults(fn=cmd_lap_start)
     s = lap.add_parser("ship")
     s.add_argument("id")

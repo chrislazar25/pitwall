@@ -50,7 +50,7 @@ pit control --action pause, cancel, reprioritize or revoke --agent NAME
 needs a new review.
 
 ## Laps
-When Chris gives you a new feature or idea, run: pit lap start --title
+When Chris gives you a new feature or idea, run: pit lap start --agent NAME --title
 "short title" and keep the id. When it is merged, or Chris says it is done,
 run: pit lap ship ID. Pass --lap ID on asks that belong to it.
 

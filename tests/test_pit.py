@@ -178,7 +178,8 @@ class Concepts(PitCase):
 
 
 class State(PitCase):
-    KEYS = {"generated_at", "open_asks", "laps", "scores", "fuel", "garage", "radio"}
+    KEYS = {"generated_at", "event_count", "drivers", "open_asks", "laps", "pit_stops",
+            "scores", "scores_trend", "fuel", "garage", "radio"}
 
     def test_state_is_rebuilt_after_each_write(self):
         aid = self.ask("context")
@@ -196,7 +197,8 @@ class State(PitCase):
         self.assertEqual(s["scores"], {"speed": None, "ask_quality": None,
                                        "shipping": None, "ownership": None})
         self.assertEqual(s["laps"], {"running": [], "last_hours": None,
-                                     "best_hours": None, "shipped_total": 0})
+                                     "best_hours": None, "shipped_total": 0,
+                                     "pace_hours": 4, "last": None, "finished": []})
 
     def test_open_lists_waiting_minutes(self):
         self.ask("context")
